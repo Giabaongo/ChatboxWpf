@@ -2,6 +2,7 @@
 using System.Net.Sockets;
 using System.Text;
 using System.Windows;
+using System.Windows.Controls;
 
 namespace ChatboxWpf
 {
@@ -30,7 +31,6 @@ namespace ChatboxWpf
                 server.Start();
                 ChatList.Items.Add("Waiting for clients...");
 
-                // Accept up to MaxClients
                 _ = Task.Run(async () =>
                 {
                     while (clients.Count < MaxClients)
@@ -89,7 +89,6 @@ namespace ChatboxWpf
             MessageBox.Clear();
         }
 
-        // Server: receive from each client and broadcast to others
         private async Task ReceiveMessagesFromClient(TcpClient senderClient)
         {
             var buffer = new byte[1024];
@@ -116,7 +115,6 @@ namespace ChatboxWpf
             Dispatcher.Invoke(() => ChatList.Items.Add("A client disconnected."));
         }
 
-        // Server: broadcast to all except sender
         private void BroadcastMessage(string message, TcpClient sender)
         {
             var data = Encoding.UTF8.GetBytes(message);
@@ -136,7 +134,6 @@ namespace ChatboxWpf
             }
         }
 
-        // Client: receive from server
         private async Task ReceiveMessagesFromServer()
         {
             var buffer = new byte[1024];
@@ -153,6 +150,22 @@ namespace ChatboxWpf
                 {
                     break;
                 }
+            }
+        }
+
+        private void EmojiButton_Click(object sender, RoutedEventArgs e)
+        {
+            EmojiPopup.IsOpen = true;
+        }
+
+        private void Emoji_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is Button btn && btn.Content is string emoji)
+            {
+                MessageBox.Text += emoji;
+                EmojiPopup.IsOpen = false;
+                MessageBox.Focus();
+                MessageBox.CaretIndex = MessageBox.Text.Length;
             }
         }
     }
