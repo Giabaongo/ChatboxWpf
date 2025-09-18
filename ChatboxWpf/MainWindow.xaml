@@ -8,8 +8,14 @@
             <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
         <ListBox x:Name="ChatList" Grid.Row="0" Margin="10" />
-        <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="10">
-            <Button x:Name="EmojiButton" Content="😊" Width="40" Height="30" Click="EmojiButton_Click"/>
+        <Grid Grid.Row="1" Margin="10">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <Button x:Name="EmojiButton" Grid.Column="0" Content="😊" Width="40" Height="30" Click="EmojiButton_Click"/>
             <Popup x:Name="EmojiPopup" PlacementTarget="{Binding ElementName=EmojiButton}" Placement="Bottom" StaysOpen="False">
                 <Border Background="White" BorderBrush="Gray" BorderThickness="2" CornerRadius="6" Width="320" Height="180">
                     <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
@@ -261,8 +267,18 @@
                 </Border>
             </Popup>
 
-            <TextBox x:Name="MessageBox" Width="250" Height="30" Margin="10,0,0,0"/>
-            <Button Content="Send" Width="80" Height="30" Margin="10,0,0,0" Click="Send_Click"/>
-        </StackPanel>
+            <TextBox x:Name="MessageInput" Grid.Column="1" Height="30" 
+                     Margin="10,0,0,0" VerticalContentAlignment="Center"
+                     KeyDown="MessageInput_KeyDown"/>
+            
+
+            <Button Grid.Column="2" Content="Send" Width="80" Height="30" 
+                    Margin="10,0,0,0" Click="Send_Click"/>
+
+            <Button Grid.Column="3" Width="40" Height="30" 
+                    Margin="10,0,0,0" Click="SendFile_Click" 
+                    FontSize="16" Content="📎"/>
+
+        </Grid>
     </Grid>
 </Window>
