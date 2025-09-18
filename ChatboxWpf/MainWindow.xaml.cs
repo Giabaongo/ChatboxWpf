@@ -5,6 +5,7 @@ using System.Net.Sockets;
 using System.Text;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
 
 namespace ChatboxWpf
 {
@@ -51,17 +52,30 @@ namespace ChatboxWpf
             }
             else
             {
-                myUsername = Microsoft.VisualBasic.Interaction.InputBox("Enter your username:", "Username", "Guest");
+                try
+                {
+                    myUsername = Microsoft.VisualBasic.Interaction.InputBox("Enter your username:", "Username", "Guest");
+                    if (string.IsNullOrWhiteSpace(myUsername))
+                        throw new Exception("Username is required.");
 
-                client = new TcpClient();
-                var ip = Microsoft.VisualBasic.Interaction.InputBox("Enter server IP:", "Connect to Server", "127.0.0.1");
-                await client.ConnectAsync(ip, 9000);
-                ChatList.Items.Add("Connected to server.");
-                stream = client.GetStream();
+                    client = new TcpClient();
+                    var ip = Microsoft.VisualBasic.Interaction.InputBox("Enter server IP:", "Connect to Server", "127.0.0.1");
+                    if (string.IsNullOrWhiteSpace(ip))
+                        throw new Exception("Server IP is required.");
 
-                await stream.WriteAsync(Encoding.UTF8.GetBytes("USER|" + myUsername + "\n"));
+                    await client.ConnectAsync(ip, 9000);
+                    ChatList.Items.Add("Connected to server.");
+                    stream = client.GetStream();
 
-                _ = Task.Run(ReceiveMessagesFromServer);
+                    await stream.WriteAsync(Encoding.UTF8.GetBytes("USER|" + myUsername + "\n"));
+
+                    _ = Task.Run(ReceiveMessagesFromServer);
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show(ex.Message + "\nApplication will exit.");
+                    Application.Current.Shutdown();
+                }
             }
         }
 
@@ -97,6 +111,16 @@ namespace ChatboxWpf
             }
             MessageInput.Clear();
         }
+
+        private void MessageInput_KeyDown(object sender, KeyEventArgs e)
+        {
+            if (e.Key == Key.Enter)
+            {
+                Send_Click(sender, e);
+                e.Handled = true;
+            }
+        }
+
         private Task ReceiveMessagesFromClient(TcpClient senderClient)
         {
             var senderStream = senderClient.GetStream();
@@ -144,27 +168,6 @@ namespace ChatboxWpf
             }
         }
 
-        //Progress bar
-        private void StartFileUpload()
-        {
-            FileProgress.Visibility = Visibility.Visible;
-            FileProgressText.Visibility = Visibility.Visible;
-            FileProgress.Value = 0;
-            FileProgressText.Text = "Uploading...";
-        }
-
-        private void UpdateFileProgress(double percent)
-        {
-            FileProgress.Value = percent;
-            FileProgressText.Text = $"{percent:0}%";
-        }
-
-        private void FinishFileUpload()
-        {
-            FileProgress.Visibility = Visibility.Collapsed;
-            FileProgressText.Visibility = Visibility.Collapsed;
-        }
-
         //Upload files
         private void SendFile_Click(object sender, RoutedEventArgs e)
         {
@@ -175,7 +178,6 @@ namespace ChatboxWpf
                 string fileName = Path.GetFileName(filePath);
                 long fileSize = new FileInfo(filePath).Length;
 
-                StartFileUpload();
                 _ = Task.Run(() => SendFileAsync(filePath, fileName, fileSize));
             }
         }
@@ -190,7 +192,6 @@ namespace ChatboxWpf
 
                 Dispatcher.Invoke(() =>
                 {
-                    FinishFileUpload();
                     ChatList.Items.Add($"Me: [File sent: {fileName}]");
                 });
             }
@@ -253,11 +254,6 @@ namespace ChatboxWpf
                 {
                     await stream.WriteAsync(buffer, 0, bytesRead);
                 }
-
-                totalSent += bytesRead;
-                double percent = (double)totalSent / fileSize * 100;
-
-                Dispatcher.Invoke(() => UpdateFileProgress(percent));
             }
         }
         private async Task HandleIncomingData(NetworkStream ns, TcpClient sender = null)
@@ -309,23 +305,16 @@ namespace ChatboxWpf
 
             long totalReceived = 0;
 
-            Dispatcher.Invoke(() => StartFileUpload());
-
             while (totalReceived < fileSize)
             {
                 int read = await ns.ReadAsync(buffer, 0, buffer.Length);
                 if (read == 0) break;
                 await fs.WriteAsync(buffer, 0, read);
                 totalReceived += read;
-
-                double percent = (double)totalReceived / fileSize * 100;
-                Dispatcher.Invoke(() => UpdateFileProgress(percent));
             }
 
             Dispatcher.Invoke(() =>
             {
-                FinishFileUpload();
-
                 var item = new ListBoxItem
                 {
                     Content = $"{senderName}: [Sent file: {fileName}] (Click to save)",
