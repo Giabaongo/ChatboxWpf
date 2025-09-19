@@ -2,7 +2,6 @@
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
-using System.Reflection.PortableExecutable;
 using System.Text;
 using System.Windows;
 using System.Windows.Controls;
@@ -12,10 +11,14 @@ namespace ChatboxWpf
 {
     public partial class MainWindow : Window
     {
-        private TcpListener server;
-        private List<TcpClient> clients = new();
-        private TcpClient client;
-        private NetworkStream stream;
+        private TcpListener messageServer;
+        private TcpListener fileServer;
+        private List<TcpClient> messageClients = new();
+        private List<TcpClient> fileClients = new();
+        private TcpClient messageClient;
+        private TcpClient fileClient;
+        private NetworkStream messageStream;
+        private NetworkStream fileStream;
         private bool isServer = false;
         private const int MaxClients = 5;
         private Dictionary<TcpClient, string> clientNames = new();
@@ -33,23 +36,8 @@ namespace ChatboxWpf
             if (result == MessageBoxResult.Yes)
             {
                 isServer = true;
-                server = new TcpListener(IPAddress.Any, 9000);
-                server.Start();
-                ChatList.Items.Add("Waiting for clients...");
-
-                _ = Task.Run(async () =>
-                {
-                    while (clients.Count < MaxClients)
-                    {
-                        var newClient = await server.AcceptTcpClientAsync();
-                        lock (clients)
-                        {
-                            clients.Add(newClient);
-                        }
-                        Dispatcher.Invoke(() => ChatList.Items.Add($"Client {clients.Count} connected."));
-                        _ = Task.Run(() => ReceiveMessagesFromClient(newClient));
-                    }
-                });
+                await StartServers();
+                ChatList.Items.Add("Server started. Waiting for clients...");
             }
             else
             {
@@ -59,25 +47,78 @@ namespace ChatboxWpf
                     if (string.IsNullOrWhiteSpace(myUsername))
                         throw new Exception("Username is required.");
 
-                    client = new TcpClient();
                     var ip = Microsoft.VisualBasic.Interaction.InputBox("Enter server IP:", "Connect to Server", "127.0.0.1");
                     if (string.IsNullOrWhiteSpace(ip))
                         throw new Exception("Server IP is required.");
 
-                    await client.ConnectAsync(ip, 9000);
-                    ChatList.Items.Add("Connected to server.");
-                    stream = client.GetStream();
+                    // Connect for messages
+                    messageClient = new TcpClient();
+                    await messageClient.ConnectAsync(ip, 9000);
+                    messageStream = messageClient.GetStream();
 
+                    // Connect for files
+                    fileClient = new TcpClient();
+                    await fileClient.ConnectAsync(ip, 9001);
+                    fileStream = fileClient.GetStream();
+
+                    ChatList.Items.Add("Connected to server.");
+
+                    // Send username
                     var userMsg = $"USER|{myUsername}\n";
-                    await stream.WriteAsync(Encoding.UTF8.GetBytes(userMsg));
+                    await messageStream.WriteAsync(Encoding.UTF8.GetBytes(userMsg));
 
                     _ = Task.Run(ReceiveMessagesFromServer);
+                    _ = Task.Run(ReceiveFilesFromServer);
                 }
                 catch (Exception ex)
                 {
                     MessageBox.Show(ex.Message + "\nApplication will exit.");
                     Application.Current.Shutdown();
                 }
+            }
+        }
+
+        private async Task StartServers()
+        {
+            // Message server
+            messageServer = new TcpListener(IPAddress.Any, 9000);
+            messageServer.Start();
+
+            // File server
+            fileServer = new TcpListener(IPAddress.Any, 9001);
+            fileServer.Start();
+
+            _ = Task.Run(AcceptMessageClients);
+            _ = Task.Run(AcceptFileClients);
+        }
+
+        private async Task AcceptMessageClients()
+        {
+            while (messageClients.Count < MaxClients)
+            {
+                try
+                {
+                    var client = await messageServer.AcceptTcpClientAsync();
+                    lock (messageClients) { messageClients.Add(client); }
+                    Dispatcher.Invoke(() => ChatList.Items.Add($"Message client {messageClients.Count} connected."));
+                    _ = Task.Run(() => ReceiveMessagesFromClient(client));
+                }
+                catch { break; }
+            }
+        }
+
+        private async Task AcceptFileClients()
+        {
+            while (fileClients.Count < MaxClients)
+            {
+                try
+                {
+                    var fileClient = await fileServer.AcceptTcpClientAsync();
+                    lock (fileClients) { fileClients.Add(fileClient); }
+                    Dispatcher.Invoke(() => ChatList.Items.Add($"File client {fileClients.Count} connected."));
+                    _ = Task.Run(() => ReceiveFilesFromClient(fileClient));
+                }
+                catch { break; }
             }
         }
 
@@ -92,9 +133,9 @@ namespace ChatboxWpf
                 var data = Encoding.UTF8.GetBytes(fullMessage + "\n");
 
                 List<TcpClient> snapshot;
-                lock (clients)
+                lock (messageClients)
                 {
-                    snapshot = new List<TcpClient>(clients);
+                    snapshot = new List<TcpClient>(messageClients);
                 }
 
                 foreach (var c in snapshot)
@@ -107,9 +148,9 @@ namespace ChatboxWpf
                     }
                     catch
                     {
-                        lock (clients)
+                        lock (messageClients)
                         {
-                            clients.Remove(c);
+                            messageClients.Remove(c);
                             clientNames.Remove(c);
                         }
                     }
@@ -118,10 +159,10 @@ namespace ChatboxWpf
             }
             else
             {
-                if (stream == null || !stream.CanWrite) return;
+                if (messageStream == null || !messageStream.CanWrite) return;
                 var fullMessage = $"MSG|{myUsername}: {message}";
                 var data = Encoding.UTF8.GetBytes(fullMessage + "\n");
-                await stream.WriteAsync(data, 0, data.Length);
+                await messageStream.WriteAsync(data, 0, data.Length);
                 Dispatcher.Invoke(() => ChatList.Items.Add($"Me: {message}"));
             }
             MessageInput.Clear();
@@ -139,21 +180,32 @@ namespace ChatboxWpf
         private Task ReceiveMessagesFromClient(TcpClient senderClient)
         {
             var senderStream = senderClient.GetStream();
-            return HandleIncomingData(senderStream, senderClient);
+            return HandleIncomingMessages(senderStream, senderClient);
         }
 
         private Task ReceiveMessagesFromServer()
         {
-            return HandleIncomingData(stream);
+            return HandleIncomingMessages(messageStream);
+        }
+
+        private Task ReceiveFilesFromClient(TcpClient fileClient)
+        {
+            var fileStream = fileClient.GetStream();
+            return HandleIncomingFiles(fileStream, fileClient);
+        }
+
+        private Task ReceiveFilesFromServer()
+        {
+            return HandleIncomingFiles(fileStream);
         }
 
         private async void BroadcastMessage(string message, TcpClient sender)
         {
             var data = Encoding.UTF8.GetBytes(message + "\n");
             List<TcpClient> snapshot;
-            lock (clients)
+            lock (messageClients)
             {
-                snapshot = new List<TcpClient>(clients);
+                snapshot = new List<TcpClient>(messageClients);
             }
 
             foreach (var c in snapshot)
@@ -167,16 +219,16 @@ namespace ChatboxWpf
                 }
                 catch
                 {
-                    lock (clients)
+                    lock (messageClients)
                     {
-                        clients.Remove(c);
+                        messageClients.Remove(c);
                         clientNames.Remove(c);
                     }
                 }
             }
         }
 
-        private async Task HandleIncomingData(NetworkStream ns, TcpClient sender = null)
+        private async Task HandleIncomingMessages(NetworkStream ns, TcpClient sender = null)
         {
             var buffer = new byte[4096];
             var messageBuilder = new StringBuilder();
@@ -194,16 +246,14 @@ namespace ChatboxWpf
                     string data = messageBuilder.ToString();
                     string[] lines = data.Split('\n');
 
-                    // Giữ lại dòng cuối chưa hoàn thành
                     for (int i = 0; i < lines.Length - 1; i++)
                     {
                         string line = lines[i].Trim();
                         if (string.IsNullOrWhiteSpace(line)) continue;
 
-                        await ProcessMessage(line, ns, sender);
+                        await ProcessMessage(line, sender);
                     }
 
-                    // Cập nhật buffer với dòng chưa hoàn thành
                     messageBuilder.Clear();
                     if (lines.Length > 0 && !data.EndsWith('\n'))
                     {
@@ -218,9 +268,9 @@ namespace ChatboxWpf
 
             if (sender != null)
             {
-                lock (clients)
+                lock (messageClients)
                 {
-                    clients.Remove(sender);
+                    messageClients.Remove(sender);
                     if (clientNames.ContainsKey(sender))
                     {
                         var name = clientNames[sender];
@@ -231,7 +281,7 @@ namespace ChatboxWpf
             }
         }
 
-        private async Task ProcessMessage(string message, NetworkStream ns, TcpClient sender)
+        private async Task ProcessMessage(string message, TcpClient sender)
         {
             if (message.StartsWith("USER|"))
             {
@@ -268,13 +318,38 @@ namespace ChatboxWpf
                     }
                 }
             }
-            else if (message.StartsWith("FILE|"))
-            {
-                await HandleFileTransfer(message, ns, sender);
-            }
             else
             {
                 Dispatcher.Invoke(() => ChatList.Items.Add(message));
+            }
+        }
+
+        private async Task HandleIncomingFiles(NetworkStream ns, TcpClient sender = null)
+        {
+            var buffer = new byte[32 * 1024];
+
+            while (true)
+            {
+                try
+                {
+                    // Read file header first
+                    var headerBuffer = new byte[1024];
+                    int headerBytes = await ns.ReadAsync(headerBuffer, 0, headerBuffer.Length);
+                    if (headerBytes == 0) break;
+
+                    string headerData = Encoding.UTF8.GetString(headerBuffer, 0, headerBytes);
+                    var lines = headerData.Split('\n');
+                    string header = lines[0];
+
+                    if (header.StartsWith("FILE|"))
+                    {
+                        await HandleFileTransfer(header, ns, sender);
+                    }
+                }
+                catch
+                {
+                    break;
+                }
             }
         }
 
@@ -283,58 +358,39 @@ namespace ChatboxWpf
             var parts = header.Split('|');
             if (parts.Length < 3) return;
 
-            string fileName, senderName;
-            long fileSize;
+            string fileName = parts[1];
+            if (!long.TryParse(parts[2], out long fileSize)) return;
 
-            if (parts.Length == 3)
-            {
-                fileName = parts[1];
-                if (!long.TryParse(parts[2], out fileSize)) return;
-
-                if (sender != null && clientNames.ContainsKey(sender))
-                {
-                    senderName = clientNames[sender];
-                }
-                else
-                {
-                    senderName = "Unknown";
-                }
-            }
-            else if (parts.Length == 4)
+            string senderName = "Unknown";
+            if (parts.Length >= 4)
             {
                 senderName = parts[3];
-                fileName = parts[1];
-                if (!long.TryParse(parts[2], out fileSize)) return;
             }
-            else
+            else if (sender != null && clientNames.ContainsKey(sender))
             {
-                return;
+                senderName = clientNames[sender];
             }
 
             Dispatcher.Invoke(() => ChatList.Items.Add($"{senderName}: [Sending file: {fileName}]"));
 
             if (isServer && sender != null)
             {
-                await ReceiveAndBroadcastFile(fileName, fileSize, ns, sender);
+                await ReceiveAndBroadcastFile(fileName, fileSize, ns, sender, senderName);
             }
             else
             {
                 await ReceiveAndSaveFile(fileName, fileSize, ns, senderName);
             }
         }
-        private async Task ReceiveAndBroadcastFile(string fileName, long fileSize, NetworkStream senderStream, TcpClient sender)
+
+        private async Task ReceiveAndBroadcastFile(string fileName, long fileSize, NetworkStream senderStream, TcpClient sender, string senderName)
         {
             try
             {
-                string senderName = "Unknown";
-                if (clientNames.ContainsKey(sender))
-                {
-                    senderName = clientNames[sender];
-                }
                 List<TcpClient> targetClients;
-                lock (clients)
+                lock (fileClients)
                 {
-                    targetClients = clients.Where(c => c != sender).ToList();
+                    targetClients = fileClients.Where(c => c != sender).ToList();
                 }
 
                 if (targetClients.Count > 0)
@@ -371,10 +427,9 @@ namespace ChatboxWpf
                         }
                         catch
                         {
-                            lock (clients)
+                            lock (fileClients)
                             {
-                                clients.Remove(client);
-                                clientNames.Remove(client);
+                                fileClients.Remove(client);
                             }
                         }
                     }
@@ -411,19 +466,18 @@ namespace ChatboxWpf
                         await fs.WriteAsync(buffer, 0, bytesRead);
                         totalReceived += bytesRead;
                     }
-
-
-                    Dispatcher.Invoke(() =>
-                    {
-                        var item = new ListBoxItem
-                        {
-                            Content = $"{senderName}: [File received: {fileName}] (Double-click to save)",
-                            Tag = tempPath
-                        };
-                        item.MouseDoubleClick += FileItem_DoubleClick;
-                        ChatList.Items.Add(item);
-                    });
                 }
+
+                Dispatcher.Invoke(() =>
+                {
+                    var item = new ListBoxItem
+                    {
+                        Content = $"{senderName}: [File received: {fileName}] (Double-click to save)",
+                        Tag = tempPath
+                    };
+                    item.MouseDoubleClick += FileItem_DoubleClick;
+                    ChatList.Items.Add(item);
+                });
             }
             catch (Exception ex)
             {
@@ -473,22 +527,13 @@ namespace ChatboxWpf
         {
             try
             {
-                string header;
-                if (isServer)
-                {
-                    header = $"FILE|{fileName}|{fileSize}|Server";
-                }
-                else
-                {
-                    header = $"FILE|{fileName}|{fileSize}";
-                }
-
+                string header = $"FILE|{fileName}|{fileSize}|{(isServer ? "Server" : myUsername)}";
                 var headerBytes = Encoding.UTF8.GetBytes(header + "\n");
 
                 if (isServer)
                 {
                     List<TcpClient> snapshot;
-                    lock (clients) { snapshot = new List<TcpClient>(clients); }
+                    lock (fileClients) { snapshot = new List<TcpClient>(fileClients); }
                     foreach (var c in snapshot)
                     {
                         try
@@ -500,7 +545,7 @@ namespace ChatboxWpf
                 }
                 else
                 {
-                    await stream.WriteAsync(headerBytes, 0, headerBytes.Length);
+                    await fileStream.WriteAsync(headerBytes, 0, headerBytes.Length);
                 }
 
                 using (var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read))
@@ -513,7 +558,7 @@ namespace ChatboxWpf
                         if (isServer)
                         {
                             List<TcpClient> snapshot;
-                            lock (clients) { snapshot = new List<TcpClient>(clients); }
+                            lock (fileClients) { snapshot = new List<TcpClient>(fileClients); }
                             foreach (var c in snapshot)
                             {
                                 try
@@ -525,7 +570,7 @@ namespace ChatboxWpf
                         }
                         else
                         {
-                            await stream.WriteAsync(buffer, 0, bytesRead);
+                            await fileStream.WriteAsync(buffer, 0, bytesRead);
                         }
                     }
                 }
