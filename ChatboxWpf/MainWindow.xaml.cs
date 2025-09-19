@@ -20,6 +20,9 @@ namespace ChatboxWpf
         private Dictionary<TcpClient, string> clientNames = new();
         private string myUsername = "Me";
 
+        // Thêm dictionary để track file transfer state
+        private Dictionary<TcpClient, FileTransferState> fileTransferStates = new();
+
         public MainWindow()
         {
             InitializeComponent();
@@ -151,6 +154,45 @@ namespace ChatboxWpf
             }
         }
 
+        // Broadcast file header to other clients
+        private async Task BroadcastFileHeader(string header, TcpClient sender)
+        {
+            var data = Encoding.UTF8.GetBytes(header);
+            lock (clients)
+            {
+                foreach (var c in clients)
+                {
+                    if (c == sender) continue;
+                    try
+                    {
+                        var s = c.GetStream();
+                        if (s.CanWrite)
+                            s.WriteAsync(data, 0, data.Length);
+                    }
+                    catch { }
+                }
+            }
+        }
+
+        // Broadcast file chunk to other clients
+        private async Task BroadcastFileChunk(byte[] chunk, int size, TcpClient sender)
+        {
+            lock (clients)
+            {
+                foreach (var c in clients)
+                {
+                    if (c == sender) continue;
+                    try
+                    {
+                        var s = c.GetStream();
+                        if (s.CanWrite)
+                            s.WriteAsync(chunk, 0, size);
+                    }
+                    catch { }
+                }
+            }
+        }
+
         //Emoji
         private void EmojiButton_Click(object sender, RoutedEventArgs e)
         {
@@ -181,6 +223,7 @@ namespace ChatboxWpf
                 _ = Task.Run(() => SendFileAsync(filePath, fileName, fileSize));
             }
         }
+
         private async Task SendFileAsync(string filePath, string fileName, long fileSize)
         {
             try
@@ -256,9 +299,11 @@ namespace ChatboxWpf
                 }
             }
         }
+
         private async Task HandleIncomingData(NetworkStream ns, TcpClient sender = null)
         {
             var buffer = new byte[81920];
+            var messageBuffer = new StringBuilder();
 
             while (true)
             {
@@ -267,7 +312,15 @@ namespace ChatboxWpf
                     int bytesRead = await ns.ReadAsync(buffer, 0, buffer.Length);
                     if (bytesRead == 0) break;
 
+                    // Check if this client is currently receiving a file
+                    if (sender != null && fileTransferStates.ContainsKey(sender))
+                    {
+                        await HandleFileTransfer(sender, buffer, bytesRead);
+                        continue;
+                    }
+
                     string chunk = Encoding.UTF8.GetString(buffer, 0, bytesRead);
+
                     if (chunk.StartsWith("USER|"))
                     {
                         string name = chunk.Substring(5).Trim();
@@ -276,20 +329,99 @@ namespace ChatboxWpf
                             lock (clientNames) clientNames[sender] = name;
                         }
                         Dispatcher.Invoke(() => ChatList.Items.Add($"{name} joined."));
-                    } else if (chunk.StartsWith("FILE|"))
+                    }
+                    else if (chunk.StartsWith("FILE|"))
                     {
-                        await ReceiveFileAsync(chunk, ns, buffer);
+                        if (isServer && sender != null)
+                        {
+                            // Server receives file from client and needs to forward to other clients
+                            await HandleFileFromClient(chunk, sender);
+                        }
+                        else
+                        {
+                            // Client receives file
+                            await ReceiveFileAsync(chunk, ns, buffer);
+                        }
                     }
                     else
                     {
                         Dispatcher.Invoke(() => ChatList.Items.Add(chunk));
-                        if (isServer && sender != null) BroadcastMessage(chunk, sender);
+                        if (isServer && sender != null)
+                            BroadcastMessage(chunk, sender);
                     }
                 }
                 catch
                 {
                     break;
                 }
+            }
+
+            // Cleanup
+            if (sender != null)
+            {
+                lock (clients) clients.Remove(sender);
+                if (fileTransferStates.ContainsKey(sender))
+                    fileTransferStates.Remove(sender);
+            }
+        }
+
+        private async Task HandleFileFromClient(string header, TcpClient senderClient)
+        {
+            var parts = header.Split('|');
+            string senderName = parts[1];
+            string fileName = parts[2];
+            long fileSize = long.Parse(parts[3]);
+
+            // Initialize file transfer state for this client
+            var transferState = new FileTransferState
+            {
+                FileName = fileName,
+                FileSize = fileSize,
+                SenderName = senderName,
+                TotalReceived = 0,
+                TempFilePath = Path.Combine(Path.GetTempPath(), $"Server_{fileName}_{DateTime.Now.Ticks}")
+            };
+
+            fileTransferStates[senderClient] = transferState;
+
+            // Forward the file header to other clients
+            await BroadcastFileHeader(header, senderClient);
+
+            // Show on server UI
+            Dispatcher.Invoke(() => ChatList.Items.Add($"{senderName}: [Sending file: {fileName}]"));
+        }
+
+        private async Task HandleFileTransfer(TcpClient senderClient, byte[] buffer, int bytesRead)
+        {
+            var transferState = fileTransferStates[senderClient];
+
+            // Save chunk to temp file
+            using (var fs = new FileStream(transferState.TempFilePath, FileMode.Append, FileAccess.Write))
+            {
+                await fs.WriteAsync(buffer, 0, bytesRead);
+            }
+
+            // Forward chunk to other clients
+            await BroadcastFileChunk(buffer, bytesRead, senderClient);
+
+            transferState.TotalReceived += bytesRead;
+
+            // Check if file transfer is complete
+            if (transferState.TotalReceived >= transferState.FileSize)
+            {
+                fileTransferStates.Remove(senderClient);
+
+                // Optional: Save the file on server or just cleanup temp file
+                Dispatcher.Invoke(() =>
+                {
+                    var item = new ListBoxItem
+                    {
+                        Content = $"{transferState.SenderName}: [File received: {transferState.FileName}] (Click to save)",
+                        Tag = transferState.TempFilePath
+                    };
+                    item.MouseDoubleClick += FileItem_DoubleClick;
+                    ChatList.Items.Add(item);
+                });
             }
         }
 
@@ -300,7 +432,7 @@ namespace ChatboxWpf
             string fileName = parts[2];
             long fileSize = long.Parse(parts[3]);
 
-            string tempPath = Path.Combine(Path.GetTempPath(), $"Received_{fileName}");
+            string tempPath = Path.Combine(Path.GetTempPath(), $"Received_{fileName}_{DateTime.Now.Ticks}");
             using var fs = new FileStream(tempPath, FileMode.Create, FileAccess.Write);
 
             long totalReceived = 0;
@@ -331,7 +463,7 @@ namespace ChatboxWpf
             {
                 var dialog = new SaveFileDialog
                 {
-                    FileName = Path.GetFileName(tempPath),
+                    FileName = Path.GetFileName(tempPath).Replace($"Received_", "").Replace($"Server_", ""),
                     Filter = "All Files|*.*"
                 };
 
@@ -342,5 +474,15 @@ namespace ChatboxWpf
                 }
             }
         }
+    }
+
+    // Helper class to track file transfer state
+    public class FileTransferState
+    {
+        public string FileName { get; set; }
+        public long FileSize { get; set; }
+        public string SenderName { get; set; }
+        public long TotalReceived { get; set; }
+        public string TempFilePath { get; set; }
     }
 }
